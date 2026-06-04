@@ -42,6 +42,7 @@ as a fallback). See the README for fields.`,
 
 	root.AddCommand(newRecordCmd())
 	root.AddCommand(newStatsCmd())
+	root.AddCommand(newAuditCmd())
 	root.AddCommand(newSyncCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newInitCmd())

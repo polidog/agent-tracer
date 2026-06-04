@@ -62,6 +62,15 @@ type DailyPoint struct {
 	Count int64
 }
 
+// NameUsage is per-name usage used by the audit command to join recorded
+// activity against the installed inventory. LastUsed is the most recent event
+// timestamp for that name (zero if somehow unparsable).
+type NameUsage struct {
+	Name     string
+	Count    int64
+	LastUsed time.Time
+}
+
 type ProjectStat struct {
 	Cwd   string
 	Count int64
@@ -384,6 +393,37 @@ func (s *Store) Ranking(ctx context.Context, f Filter) ([]Ranking, error) {
 		r.AvgOutputTokens = avgOut.Float64
 		r.AvgContextTokens = avgCtx.Float64
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// NameUsage returns per-name counts and last-used timestamps for events
+// matching the filter (typically a single Kind plus a Since window). It is the
+// join source for the audit command: every distinct recorded name is reported
+// so the caller can subtract the installed inventory to find unused entries and
+// flag recorded names that no longer have a matching install (orphans). Limit
+// is intentionally ignored — audit needs the full set, not a top-N slice.
+func (s *Store) NameUsage(ctx context.Context, f Filter) ([]NameUsage, error) {
+	q, args := applyFilter(`SELECT name, COUNT(*) AS c, MAX(ts) AS last FROM events WHERE 1=1`, f, nil)
+	q += ` GROUP BY name ORDER BY c DESC, name ASC`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NameUsage
+	for rows.Next() {
+		var u NameUsage
+		var last string
+		if err := rows.Scan(&u.Name, &u.Count, &last); err != nil {
+			return nil, err
+		}
+		t, perr := time.Parse(time.RFC3339Nano, last)
+		if perr != nil {
+			t, _ = time.Parse(time.RFC3339, last)
+		}
+		u.LastUsed = t
+		out = append(out, u)
 	}
 	return out, rows.Err()
 }
