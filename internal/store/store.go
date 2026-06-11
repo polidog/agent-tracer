@@ -35,13 +35,18 @@ type Event struct {
 	Raw                 string
 	ToolUseID           string
 	DurationMs          int64
+	Model               string
 	InputTokens         int64
 	OutputTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 }
 
+// Usage carries the per-turn token counts plus the model that produced them —
+// both come from the same transcript entry, so they travel together through
+// the finalize paths.
 type Usage struct {
+	Model               string
 	InputTokens         int64
 	OutputTokens        int64
 	CacheReadTokens     int64
@@ -83,6 +88,13 @@ type HostStat struct {
 
 type UserStat struct {
 	User  string
+	Count int64
+}
+
+// ModelStat counts events per model. Model is filled at finalize time from the
+// session transcript, so rows that were never finalized group under "".
+type ModelStat struct {
+	Model string
 	Count int64
 }
 
@@ -129,6 +141,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	raw                   TEXT NOT NULL DEFAULT '',
 	tool_use_id           TEXT NOT NULL DEFAULT '',
 	duration_ms           INTEGER NOT NULL DEFAULT 0,
+	model                 TEXT NOT NULL DEFAULT '',
 	input_tokens          INTEGER NOT NULL DEFAULT 0,
 	output_tokens         INTEGER NOT NULL DEFAULT 0,
 	cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
@@ -150,6 +163,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{"output_tokens", `ALTER TABLE events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`},
 		{"cache_read_tokens", `ALTER TABLE events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`},
 		{"cache_creation_tokens", `ALTER TABLE events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`},
+		{"model", `ALTER TABLE events ADD COLUMN model TEXT NOT NULL DEFAULT ''`},
 	} {
 		if have[a.col] {
 			continue
@@ -167,6 +181,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_events_user ON events("user")`,
 		`CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_model ON events(model)`,
 	} {
 		if _, err := tx.ExecContext(ctx, idx); err != nil {
 			return err
@@ -205,7 +220,7 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 		e.Timestamp = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events(ts, source, kind, name, session_id, cwd, host, "user", raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO events(ts, source, kind, name, session_id, cwd, host, "user", raw, tool_use_id, duration_ms, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.Timestamp.UTC().Format(time.RFC3339Nano),
 		string(e.Source),
 		string(e.Kind),
@@ -217,6 +232,7 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 		e.Raw,
 		e.ToolUseID,
 		e.DurationMs,
+		e.Model,
 		e.InputTokens,
 		e.OutputTokens,
 		e.CacheReadTokens,
@@ -232,12 +248,13 @@ func (s *Store) UpdateByToolUseID(ctx context.Context, toolUseID string, duratio
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE events
 		   SET duration_ms = ?,
+		       model = ?,
 		       input_tokens = ?,
 		       output_tokens = ?,
 		       cache_read_tokens = ?,
 		       cache_creation_tokens = ?
 		 WHERE tool_use_id = ? AND duration_ms = 0`,
-		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, toolUseID,
+		durationMs, u.Model, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, toolUseID,
 	)
 	if err != nil {
 		return 0, err
@@ -291,12 +308,13 @@ func (s *Store) FinalizeRow(ctx context.Context, id, durationMs int64, u Usage) 
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE events
 		   SET duration_ms = ?,
+		       model = ?,
 		       input_tokens = ?,
 		       output_tokens = ?,
 		       cache_read_tokens = ?,
 		       cache_creation_tokens = ?
 		 WHERE id = ? AND duration_ms = 0`,
-		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, id,
+		durationMs, u.Model, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, id,
 	)
 	if err != nil {
 		return 0, err
@@ -333,6 +351,7 @@ type Filter struct {
 	Kind   Kind
 	Host   string
 	User   string
+	Model  string
 	Since  time.Time
 	Limit  int
 }
@@ -355,6 +374,10 @@ func applyFilter(q string, f Filter, args []any) (string, []any) {
 	if f.User != "" {
 		q += ` AND "user" = ?`
 		args = append(args, f.User)
+	}
+	if f.Model != "" {
+		q += ` AND model = ?`
+		args = append(args, f.Model)
 	}
 	if !f.Since.IsZero() {
 		q += ` AND ts >= ?`
@@ -448,7 +471,7 @@ func (s *Store) Daily(ctx context.Context, f Filter) ([]DailyPoint, error) {
 }
 
 func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
-	q, args := applyFilter(`SELECT id, ts, source, kind, name, session_id, cwd, host, "user", raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM events WHERE 1=1`, f, nil)
+	q, args := applyFilter(`SELECT id, ts, source, kind, name, session_id, cwd, host, "user", raw, tool_use_id, duration_ms, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM events WHERE 1=1`, f, nil)
 	q += ` ORDER BY id DESC`
 	if f.Limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
@@ -463,7 +486,7 @@ func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
 		var e Event
 		var ts string
 		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.Name, &e.SessionID, &e.Cwd, &e.Host, &e.User, &e.Raw,
-			&e.ToolUseID, &e.DurationMs, &e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheCreationTokens); err != nil {
+			&e.ToolUseID, &e.DurationMs, &e.Model, &e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheCreationTokens); err != nil {
 			return nil, err
 		}
 		t, perr := time.Parse(time.RFC3339Nano, ts)
@@ -563,6 +586,28 @@ func (s *Store) UserRanking(ctx context.Context, f Filter) ([]UserStat, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) ModelRanking(ctx context.Context, f Filter) ([]ModelStat, error) {
+	q, args := applyFilter(`SELECT model, COUNT(*) AS c FROM events WHERE 1=1`, f, nil)
+	q += ` GROUP BY model ORDER BY c DESC, model ASC`
+	if f.Limit > 0 {
+		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ModelStat
+	for rows.Next() {
+		var m ModelStat
+		if err := rows.Scan(&m.Model, &m.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // DistinctUsers returns all distinct user values present in the database. Same
 // rationale as DistinctHosts: used by the TUI to keep the user filter picker
 // stable across other filter toggles.
@@ -580,6 +625,27 @@ func (s *Store) DistinctUsers(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// DistinctModels returns all distinct model values present in the database.
+// Same rationale as DistinctHosts: used by the TUI to keep the model filter
+// picker stable across other filter toggles.
+func (s *Store) DistinctModels(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT model FROM events GROUP BY model ORDER BY COUNT(*) DESC, model ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }

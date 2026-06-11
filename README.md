@@ -7,7 +7,7 @@
 Claude Code（および Codex）で使った **Skill** / **slash command** / **MCP ツール**の
 利用状況を SQLite/Turso に記録し、ターミナル UI で集計を眺めるためのツール。
 
-- `agent-tracer`        … Bubble Tea 製の TUI で 8 つのビューを切替表示
+- `agent-tracer`        … Bubble Tea 製の TUI で 9 つのビューを切替表示
   - Skills / Commands / MCP / Projects / Hosts / Users / Daily / Recent
 - `agent-tracer record` … hook から渡された JSON を読んで 1 件記録する
 - `agent-tracer stats`  … ランキング / 日次タイムラインを stdout に出す
@@ -222,7 +222,9 @@ slash command 投入を自動で記録できる。`agent-tracer` は失敗して
 `duration_ms` は INSERT から finalize までのウォールタイム (ミリ秒)。token usage は
 `transcript_path` で渡される JSONL の最新 assistant メッセージから
 `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`
-/ `output_tokens` を抽出する。
+/ `output_tokens` を抽出する。同じ finalize タイミングで利用モデルも記録される —
+Claude Code は assistant メッセージの `model`、Codex は rollout の直近
+`turn_context` の `model` を `model` 列に書き込む。
 
 PostToolUse / Stop の hook を入れ忘れても INSERT は機能する (duration と token は 0 のまま) ので、
 後から段階的に有効化してもよい。
@@ -336,13 +338,15 @@ Codex は cache の生成/読み込みを区別しないため、以下のよう
 agent-tracer
 ```
 
-- `tab` / `←` `→` / `1`–`8`: ビュー切替 (Skills / Commands / MCP / Projects / Hosts / Users / Daily / Recent)
+- `tab` / `←` `→` / `1`–`9`: ビュー切替 (Skills / Commands / MCP / Projects / Hosts / Users / Models / Daily / Recent)
 - `↑` `↓` または `j` `k`: 行移動
+- `enter`: Recent タブで選択イベントの詳細表示 (model・token 内訳・session など、`esc` で閉じる)
 - `r`: 再読込
 - `f`: 期間切替 (All / 7d / 24h)
 - `s`: source 切替 (All / Claude / Codex)
 - `m`: host 切替 (All / 各端末)
 - `u`: user 切替 (All / 各メンバー)
+- `o`: model 切替 (All / 各モデル)
 - `q` または `Ctrl+C`: 終了
 
 ### CLI 集計
@@ -362,6 +366,10 @@ agent-tracer stats --by host
 
 # 特定端末だけに絞る
 agent-tracer stats --host macbook-work
+
+# モデル別ランキング / 特定モデルに絞る
+agent-tracer stats --by model
+agent-tracer stats --model claude-fable-5
 
 # 日次タイムライン (全件)
 agent-tracer stats --daily
@@ -394,6 +402,7 @@ CREATE TABLE events (
   raw                   TEXT NOT NULL DEFAULT '',  -- 元の hook JSON (share_raw=false で空に)
   tool_use_id           TEXT NOT NULL DEFAULT '',  -- skill の PreToolUse→PostToolUse 対応用
   duration_ms           INTEGER NOT NULL DEFAULT 0,  -- INSERT→finalize の経過 ms (0 = 未確定)
+  model                 TEXT NOT NULL DEFAULT '',    -- finalize 時に transcript から取得 ('' = 未確定)
   input_tokens          INTEGER NOT NULL DEFAULT 0,  -- 以下 transcript の最新 usage
   output_tokens         INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens     INTEGER NOT NULL DEFAULT 0,

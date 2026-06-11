@@ -295,7 +295,7 @@ func TestPendingRowsAndFinalizeRow(t *testing.T) {
 	}
 
 	// FinalizeRow with usage.
-	u := Usage{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 200}
+	u := Usage{Model: "gpt-5.5", InputTokens: 100, OutputTokens: 50, CacheReadTokens: 200}
 	n, err := s.FinalizeRow(context.Background(), pending[0].ID, 1500, u)
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +325,7 @@ func TestPendingRowsAndFinalizeRow(t *testing.T) {
 	if got == nil {
 		t.Fatal("finalized row not found")
 	}
-	if got.DurationMs != 1500 || got.InputTokens != 100 || got.OutputTokens != 50 || got.CacheReadTokens != 200 {
+	if got.DurationMs != 1500 || got.Model != "gpt-5.5" || got.InputTokens != 100 || got.OutputTokens != 50 || got.CacheReadTokens != 200 {
 		t.Errorf("finalized row mismatch: %+v", got)
 	}
 }
@@ -354,13 +354,21 @@ func TestSkillFinalizeByToolUseID(t *testing.T) {
 		}
 	}
 
-	u := Usage{InputTokens: 1, OutputTokens: 2, CacheReadTokens: 3, CacheCreationTokens: 4}
+	u := Usage{Model: "claude-fable-5", InputTokens: 1, OutputTokens: 2, CacheReadTokens: 3, CacheCreationTokens: 4}
 	n, err := s.UpdateByToolUseID(context.Background(), "tu_x", 2000, u)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Errorf("rows affected = %d", n)
+	}
+
+	rows, err := s.Recent(context.Background(), Filter{Model: "claude-fable-5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Model != "claude-fable-5" {
+		t.Errorf("model filter rows = %+v", rows)
 	}
 
 	// Second update is a no-op (WHERE duration_ms = 0).
@@ -376,6 +384,41 @@ func TestSkillFinalizeByToolUseID(t *testing.T) {
 	}
 	if ok2 {
 		t.Errorf("StartTime ok=true for missing tool_use_id")
+	}
+}
+
+func TestModelRanking(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+	mk := func(model string, n int) {
+		for i := 0; i < n; i++ {
+			insertEvent(t, s, Event{
+				Timestamp: now, Source: SourceClaude, Kind: KindSkill, Name: "x",
+				Model: model,
+			})
+		}
+	}
+	mk("claude-fable-5", 3)
+	mk("gpt-5.5", 2)
+	mk("", 1) // never finalized — model unknown
+
+	ms, err := s.ModelRanking(context.Background(), Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ms) != 3 {
+		t.Fatalf("want 3 model buckets, got %d (%+v)", len(ms), ms)
+	}
+	if ms[0].Model != "claude-fable-5" || ms[0].Count != 3 {
+		t.Errorf("top model = %+v, want claude-fable-5:3", ms[0])
+	}
+
+	distinct, err := s.DistinctModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(distinct) != 3 || distinct[0] != "claude-fable-5" {
+		t.Errorf("distinct models = %v", distinct)
 	}
 }
 
