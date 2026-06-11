@@ -177,7 +177,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintln(cmd.OutOrStdout(), "agent-tracer 0.2.0")
+			fmt.Fprintln(cmd.OutOrStdout(), "agent-tracer 0.3.0")
 		},
 	}
 }
