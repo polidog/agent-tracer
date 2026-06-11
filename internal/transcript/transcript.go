@@ -17,6 +17,7 @@ import (
 //
 // Mappings:
 //   - claude: assistant.message.usage.{input,output,cache_read,cache_creation}_input_tokens
+//     plus assistant.message.model as Usage.Model.
 //   - codex:  event_msg + token_count.info.last_token_usage
 //     (input_tokens, cached_input_tokens, output_tokens). Codex does not
 //     distinguish cache-creation vs cache-read tokens, so cached_input_tokens
@@ -24,6 +25,8 @@ import (
 //     non-cached portion (input_tokens - cached_input_tokens) is stored as
 //     InputTokens so that input + cache_read + cache_creation still equals the
 //     full context size — keeping the stats query identity with Claude rows.
+//     token_count carries no model name, so Usage.Model comes from the nearest
+//     preceding turn_context entry (Codex writes one per turn).
 func LatestUsage(path, source string) (store.Usage, bool) {
 	if path == "" {
 		return store.Usage{}, false
@@ -52,6 +55,7 @@ func LatestUsage(path, source string) (store.Usage, bool) {
 type claudeEntry struct {
 	Type    string `json:"type"`
 	Message struct {
+		Model string `json:"model"`
 		Usage struct {
 			InputTokens              int64 `json:"input_tokens"`
 			OutputTokens             int64 `json:"output_tokens"`
@@ -78,7 +82,14 @@ func latestUsageClaude(lines []string) (store.Usage, bool) {
 		if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadInputTokens == 0 && u.CacheCreationInputTokens == 0 {
 			continue
 		}
+		model := e.Message.Model
+		if model == "<synthetic>" {
+			// Claude Code injects synthetic assistant entries (e.g. errors);
+			// they carry no real model name.
+			model = ""
+		}
 		return store.Usage{
+			Model:               model,
 			InputTokens:         u.InputTokens,
 			OutputTokens:        u.OutputTokens,
 			CacheReadTokens:     u.CacheReadInputTokens,
@@ -97,6 +108,10 @@ func latestUsageClaude(lines []string) (store.Usage, bool) {
 type codexRolloutLine struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
+}
+
+type codexTurnContextPayload struct {
+	Model string `json:"model"`
 }
 
 type codexTokenCountPayload struct {
@@ -144,6 +159,7 @@ func latestUsageCodex(lines []string) (store.Usage, bool) {
 			nonCached = 0
 		}
 		return store.Usage{
+			Model:               codexModelBefore(lines, i),
 			InputTokens:         nonCached,
 			OutputTokens:        u.OutputTokens,
 			CacheReadTokens:     u.CachedInputTokens,
@@ -151,4 +167,27 @@ func latestUsageCodex(lines []string) (store.Usage, bool) {
 		}, true
 	}
 	return store.Usage{}, false
+}
+
+// codexModelBefore returns the model from the nearest turn_context entry at or
+// before line index i — the context that governed the turn whose token_count we
+// just attributed. Empty string when the rollout has none (old Codex versions).
+func codexModelBefore(lines []string, i int) string {
+	for ; i >= 0; i-- {
+		var rl codexRolloutLine
+		if err := json.Unmarshal([]byte(lines[i]), &rl); err != nil {
+			continue
+		}
+		if rl.Type != "turn_context" || len(rl.Payload) == 0 {
+			continue
+		}
+		var tc codexTurnContextPayload
+		if err := json.Unmarshal(rl.Payload, &tc); err != nil {
+			continue
+		}
+		if tc.Model != "" {
+			return tc.Model
+		}
+	}
+	return ""
 }

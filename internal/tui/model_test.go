@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/polidog/agent-tracer/internal/store"
 )
 
@@ -119,24 +121,129 @@ func TestRecentRowsRenders(t *testing.T) {
 			Source:      store.SourceCodex,
 			Kind:        store.KindSkill,
 			Name:        "verify",
+			Model:       "gpt-5.5",
 			DurationMs:  2500,
 			InputTokens: 100, CacheReadTokens: 200, CacheCreationTokens: 50,
 		},
+		{
+			Timestamp: ts,
+			Source:    store.SourceClaude,
+			Kind:      store.KindCommand,
+			Name:      "/plan",
+			// never finalized — no model
+		},
 	}
 	rows := recentRows(es)
-	if len(rows) != 1 {
+	if len(rows) != 2 {
 		t.Fatalf("rows = %d", len(rows))
 	}
 	row := rows[0]
 	if row[1] != "codex" || row[2] != "skill" || row[3] != "verify" {
 		t.Errorf("src/kind/name = %v", row)
 	}
-	if row[4] != "2.5s" {
-		t.Errorf("duration = %q, want 2.5s", row[4])
+	if row[4] != "gpt-5.5" {
+		t.Errorf("model = %q, want gpt-5.5", row[4])
+	}
+	if row[5] != "2.5s" {
+		t.Errorf("duration = %q, want 2.5s", row[5])
 	}
 	// ctx = 100 + 200 + 50 = 350
-	if row[5] != "350" {
-		t.Errorf("ctx = %q, want 350", row[5])
+	if row[6] != "350" {
+		t.Errorf("ctx = %q, want 350", row[6])
+	}
+	if rows[1][4] != "—" {
+		t.Errorf("empty model should render as —, got %q", rows[1][4])
+	}
+}
+
+func TestModelRowsHandlesEmpty(t *testing.T) {
+	ms := []store.ModelStat{{Model: "", Count: 3}, {Model: "claude-fable-5", Count: 7}}
+	rows := modelRows(ms)
+	if rows[0][1] != "(unknown)" {
+		t.Errorf("empty model should render as (unknown), got %q", rows[0][1])
+	}
+	if rows[1][1] != "claude-fable-5" {
+		t.Errorf("model = %q", rows[1][1])
+	}
+}
+
+func TestDetailFields(t *testing.T) {
+	e := store.Event{
+		ID:          42,
+		Timestamp:   time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC),
+		Source:      store.SourceClaude,
+		Kind:        store.KindSkill,
+		Name:        "verify",
+		Model:       "claude-fable-5",
+		SessionID:   "sess1",
+		Cwd:         "/repo",
+		Host:        "mac1",
+		User:        "alice@x",
+		ToolUseID:   "tu_1",
+		DurationMs:  2500,
+		InputTokens: 100, OutputTokens: 50, CacheReadTokens: 200, CacheCreationTokens: 50,
+	}
+	fields := detailFields(e)
+	byLabel := map[string]string{}
+	for _, f := range fields {
+		byLabel[f[0]] = f[1]
+	}
+	if byLabel["Model"] != "claude-fable-5" {
+		t.Errorf("Model = %q", byLabel["Model"])
+	}
+	if byLabel["Duration"] != "2.5s" {
+		t.Errorf("Duration = %q", byLabel["Duration"])
+	}
+	// context = 100 + 200 + 50 = 350
+	if byLabel["Context"] != "350" {
+		t.Errorf("Context = %q", byLabel["Context"])
+	}
+	if byLabel["Session"] != "sess1" || byLabel["Tool use ID"] != "tu_1" {
+		t.Errorf("session/tool_use_id = %q / %q", byLabel["Session"], byLabel["Tool use ID"])
+	}
+
+	// Pending event with no model/session → dashes.
+	fields = detailFields(store.Event{})
+	byLabel = map[string]string{}
+	for _, f := range fields {
+		byLabel[f[0]] = f[1]
+	}
+	if byLabel["Model"] != "—" || byLabel["Duration"] != "—" || byLabel["Session"] != "—" {
+		t.Errorf("empty event fields = %v", byLabel)
+	}
+}
+
+func TestDetailOverlayOpenClose(t *testing.T) {
+	m := New(nil)
+	m.tab = tabRecent
+	m.recent = []store.Event{{ID: 1, Name: "verify", Model: "claude-fable-5"}}
+	m.recentTbl.SetRows(recentRows(m.recent))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.detail == nil || m.detail.Name != "verify" {
+		t.Fatalf("enter on Recent should open detail, got %+v", m.detail)
+	}
+
+	// While open, navigation keys are swallowed (tab must not change).
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if m.tab != tabRecent || m.detail == nil {
+		t.Fatalf("tab key should be swallowed while detail open")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if m.detail != nil {
+		t.Fatal("esc should close detail")
+	}
+
+	// Enter on a non-Recent tab must not open the overlay.
+	m.tab = tabSkills
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.detail != nil {
+		t.Fatal("enter on Skills tab should not open detail")
 	}
 }
 

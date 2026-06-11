@@ -44,7 +44,7 @@ Thin `main.go` → `internal/cmd` cobra root. Subcommands live alongside it:
    - `UserPromptSubmit` → insert `kind=command` if prompt starts with `/`; if `--source codex`, additionally insert one `kind=skill` per `$mention` (deduped, env-var names skipped).
    - `PostToolUse` + `tool_name` in {`Skill`, `mcp__*`} → `actionFinishTool` (pairs with the matching insert via `tool_use_id`).
    - `Stop` → `actionFinishTurn` (finalize every pending row in the session).
-3. Inserts go through `store.Insert`. Finalizers compute `duration_ms` from the original timestamp and pull token usage from `transcript_path` via `internal/transcript.LatestUsage`.
+3. Inserts go through `store.Insert`. Finalizers compute `duration_ms` from the original timestamp and pull token usage **and the model name** from `transcript_path` via `internal/transcript.LatestUsage` (Claude: `assistant.message.model`; Codex: nearest preceding `turn_context.payload.model` — token_count entries carry no model). `Usage.Model` rides with the token counts through `UpdateByToolUseID`/`FinalizeRow` into the `model` column; rows that never finalize keep `model = ''`.
 
 The Pre/Post pairing for skills and MCP tools uses `tool_use_id`; `Store.UpdateByToolUseID` and `Store.StartTime` are kind-agnostic (commands carry no `tool_use_id`, so an implicit kind filter is fine). The `Stop` path uses `(session_id, duration_ms = 0)` over `kind IN ('command','skill','mcp')` to catch anything PostToolUse missed. **`Stop` is also the only place Codex skills ever get duration/tokens** because Codex has no Skill tool — skill bodies are injected as prompt text. The transcript parser normalizes Codex `last_token_usage` (input/cached/output) into the Claude 4-column shape so `input + cache_read + cache_creation = context size` holds for both sources (see `internal/transcript/transcript.go` doc comment).
 
@@ -59,7 +59,7 @@ The Pre/Post pairing for skills and MCP tools uses `tool_use_id`; `Store.UpdateB
 
 **`Migrate` runs all DDL inside a single transaction.** This is load-bearing: Turso's embedded replica pushes WAL frames atomically per transaction, and an earlier "one Exec per statement" version produced `WAL frame insert conflict` errors on first run (see commit `4bfbc89` and `08a7f72`). SQLite has no `ADD COLUMN IF NOT EXISTS`, so `Migrate` first reads `PRAGMA table_info(events)` and skips any `ALTER` whose column already exists — do not switch to error-catching, that would abort the surrounding transaction.
 
-All read queries flow through `applyFilter` (`Source`/`Kind`/`Host`/`User`/`Since`). When adding a new filter dimension, extend `Filter` + `applyFilter` once instead of hand-rolling WHERE clauses per query.
+All read queries flow through `applyFilter` (`Source`/`Kind`/`Host`/`User`/`Model`/`Since`). When adding a new filter dimension, extend `Filter` + `applyFilter` once instead of hand-rolling WHERE clauses per query.
 
 ### Config resolution
 
@@ -74,7 +74,7 @@ All read queries flow through `applyFilter` (`Source`/`Kind`/`Host`/`User`/`Sinc
 
 ### TUI (`internal/tui`)
 
-Bubble Tea single `Model` with 7 tabs (`Skills/Commands/Projects/Hosts/Users/Daily/Recent`) plus filter chips for range/source/host/user. The model owns six `table.Model`s; rendering and key handling are in `model.go`. `DistinctHosts`/`DistinctUsers` populate the filter pickers — they intentionally **don't** apply the current filter so the picker stays stable as the user toggles other chips.
+Bubble Tea single `Model` with 9 tabs (`Skills/Commands/MCP/Projects/Hosts/Users/Models/Daily/Recent`) plus filter chips for range/source/host/user/model. The model owns eight `table.Model`s; rendering and key handling are in `model.go`. `DistinctHosts`/`DistinctUsers`/`DistinctModels` populate the filter pickers — they intentionally **don't** apply the current filter so the picker stays stable as the user toggles other chips.
 
 ## Conventions
 
